@@ -29,21 +29,6 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-data-neo4j</artifactId>
 		</dependency>
-		<!-- Override temporaneo: spring-boot-starter-parent 3.5.16 porta neo4j-java-driver
-			 5.28.13, che internamente ha riscritto il livello di trasporto Bolt (nuovi moduli
-			 org.neo4j.bolt.connection.*). Da quando siamo passati a questa versione, il deploy su
-			 Render fallisce con Neo.ClientError.Security.Unauthorized contro Neo4j Aura, pur con
-			 credenziali verificate corrette (login manuale da Neo4j Browser riuscito). 5.13.0 e'
-			 l'ultima versione usata con successo in produzione, da prima dell'upgrade a Spring Boot
-			 3.5 (vedi commit c4512f0). Dependency diretta = vince sulla versione gestita dal BOM di
-			 Spring Boot (Maven: nearest wins). Da rimuovere se non risolve, o una volta confermato
-			 che il problema era davvero nel driver 5.28.x e tracciato upstream.
-		-->
-		<dependency>
-			<groupId>org.neo4j.driver</groupId>
-			<artifactId>neo4j-java-driver</artifactId>
-			<version>5.13.0</version>
-		</dependency>
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
