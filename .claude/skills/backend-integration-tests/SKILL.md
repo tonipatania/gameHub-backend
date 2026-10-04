@@ -108,7 +108,7 @@ fine without one. Only add a Redis container in a specific test if you're testin
 ## Before calling a test task done
 
 - Run `./mvnw verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dit.test=YourClassIT`
-  (or `./mvnw verify` for the full suite) from `gameHub/` - **not** `./mvnw test`, which never even
+  (or `./mvnw verify` for the full suite) from the repo root - **not** `./mvnw test`, which never even
   runs `*IT.java` classes in this project's Failsafe binding. Confirm it's green.
 - `./mvnw verify` runs the *entire* Maven lifecycle up through `verify`, which includes the plain
   `mvnw test` unit suite first - and `GameHubApplicationTests.contextLoads()` in that suite needs a
@@ -130,5 +130,5 @@ fine without one. Only add a Redis container in a specific test if you're testin
   even newer Docker Engine that raises its own minimum further, bump that property, not the
   testcontainers dependency version.
 - Checkstyle/Spotless apply to `IT` classes exactly as they do to unit tests (see the `backend-tests`
-  skill) - the Stop hook (`gameHub/.claude/hooks/stop-lint-check.sh`) runs both automatically on
+  skill) - the Stop hook (`.claude/hooks/stop-lint-check.sh`) runs both automatically on
   changed `.java` files, but don't rely on it silently; if it blocks, fix what it flags.

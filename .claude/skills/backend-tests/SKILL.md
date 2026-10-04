@@ -35,6 +35,6 @@ Mock at the repository/service-collaborator boundary (e.g. mock `LoginRepository
 
 ## Before calling a test task done
 
-- Run `./mvnw test` from `gameHub/` (or `./mvnw test -Dtest=ClassName#method` to target one test) and confirm it's green.
+- Run `./mvnw test` from the repo root (or `./mvnw test -Dtest=ClassName#method` to target one test) and confirm it's green.
 - Checkstyle (`checkstyle.xml`, `includeTestSourceDirectory=true`) runs on test sources too and fails the build on any warning — new test files need to satisfy it, not just compile. Fix what it flags rather than suppressing it.
 - Spotless (google-java-format, AOSP style) also formats test sources; run `./mvnw spotless:apply` if formatting gets flagged.

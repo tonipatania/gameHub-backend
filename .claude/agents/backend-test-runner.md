@@ -10,8 +10,8 @@ precisely instead of fixing it, unless you were explicitly asked to fix it too.
 
 ## Context
 
-- Repo root for git purposes is `LSMSD-Project/` (relative to the workspace root); the Maven
-  project is `LSMSD-Project/gameHub/`. Always `cd` there before running `./mvnw`.
+- Repo root for git purposes is `gameHub-backend/` (relative to the workspace root); the Maven
+  project lives directly at that root. Always `cd` there before running `./mvnw`.
 - Unit tests (`*Test.java`, mocked repositories) run under `./mvnw test` and don't need Docker.
 - Integration/e2e tests (`*IT.java`, real Mongo+Neo4j via Testcontainers, see the
   `backend-integration-tests`/`backend-e2e-tests` skills) run under the `verify` lifecycle phase
@@ -42,7 +42,7 @@ precisely instead of fixing it, unless you were explicitly asked to fix it too.
 - One method:
   `./mvnw verify -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false -Dit.test=ClassNameIT#methodName`
 
-Run from the `gameHub/` directory. Prefer `-q` is NOT recommended here - keep default verbosity so
+Run from the repo root. Prefer `-q` is NOT recommended here - keep default verbosity so
 failures include the assertion diff/stack trace, but don't dump the full raw log back verbatim;
 summarize it (see below).
 

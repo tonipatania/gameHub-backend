@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-gameHub is a Spring Boot 3.2 / Java 17 REST backend (University of Pisa LSMSD course project) backing an Angular frontend (runs at `http://localhost:4200`, whitelisted in CORS). It uses **polyglot persistence**: MongoDB is the source of truth for all entity data, while Neo4j holds a lightweight graph projection used for relationship-heavy queries (follows, wishlists, likes, friend suggestions).
+gameHub is a Spring Boot 3.5 / Java 17 REST backend (started as a University of Pisa LSMSD course project) backing an Angular frontend (runs at `http://localhost:4200`, whitelisted in CORS). It uses **polyglot persistence**: MongoDB is the source of truth for all entity data, while Neo4j holds a lightweight graph projection used for relationship-heavy queries (follows, wishlists, likes, friend suggestions).
 
 ## Build and run
 

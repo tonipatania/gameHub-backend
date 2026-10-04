@@ -95,7 +95,7 @@ assuming:
 ## Before calling a task done
 
 Same as `backend-integration-tests` (read that skill's "Before calling a test task done" section -
-not repeated here): run `./mvnw verify` from `gameHub/` (needs Docker and `mongo_local`/
+not repeated here): run `./mvnw verify` from the repo root (needs Docker and `mongo_local`/
 `neo4j_local` already running for the pre-existing unit suite that runs first; Testcontainers
 itself pulls fresh, disposable `mongo:7.0`/`neo4j:5.15` images and never touches those dev
 containers), confirm green, and let/watch the Stop hook handle Checkstyle/Spotless on changed

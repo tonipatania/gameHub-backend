@@ -106,7 +106,7 @@
 		</dependency>
 
 		<!-- Integration tests: real Mongo + Neo4j via ephemeral containers instead of the
-			 shared local dev instances (see gameHub/.claude/skills/backend-integration-tests). -->
+			 shared local dev instances (see .claude/skills/backend-integration-tests). -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-testcontainers</artifactId>

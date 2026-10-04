@@ -6,10 +6,6 @@ on:
   pull_request:
     branches: [main, develop]
 
-defaults:
-  run:
-    working-directory: gameHub
-
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -26,7 +22,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.m2/wrapper
-          key: maven-wrapper-${{ hashFiles('gameHub/.mvn/wrapper/maven-wrapper.properties') }}
+          key: maven-wrapper-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
       - run: ./mvnw -B spotless:check checkstyle:check
 
   unit-tests:
@@ -54,7 +50,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.m2/wrapper
-          key: maven-wrapper-${{ hashFiles('gameHub/.mvn/wrapper/maven-wrapper.properties') }}
+          key: maven-wrapper-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
       - run: ./mvnw -B test
 
   integration-e2e-tests:
@@ -82,7 +78,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.m2/wrapper
-          key: maven-wrapper-${{ hashFiles('gameHub/.mvn/wrapper/maven-wrapper.properties') }}
+          key: maven-wrapper-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
       - run: ./mvnw -B verify
 
   docker-build:

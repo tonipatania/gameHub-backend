@@ -1,15 +1,17 @@
 # GameHub — Backend
 
-Spring Boot backend for **GameHub**, a social network for video games. Built for the
-"Large-Scale and Multi-Structured Databases" course at the University of Pisa as a study in
-polyglot persistence: **MongoDB** stores the core entities (users, games, reviews), while
-**Neo4j** models the social graph (follows, wishlist, likes, friend/game suggestions).
+Spring Boot backend for **GameHub**, a social network for video games. Started as a project for
+the "Large-Scale and Multi-Structured Databases" course at the University of Pisa (the course's
+repo, now archived, is [`LSMSD-Project`](https://github.com/tonipatania/LSMSD-Project)) and
+developed solo since — a study in polyglot persistence: **MongoDB** stores the core entities
+(users, games, reviews), while **Neo4j** models the social graph (follows, wishlist, likes,
+friend/game suggestions).
 
 Frontend companion project: [`gameHub-FE`](https://github.com/tonipatania/gameHub-FE) (Angular).
 
 ## Stack
 
-- Java 17, Spring Boot 3.2
+- Java 17, Spring Boot 3.5
 - Spring Security + JWT (`io.jsonwebtoken`)
 - Spring Data MongoDB (reactive) — document storage
 - Spring Data Neo4j / Neo4j OGM — graph storage
@@ -22,9 +24,9 @@ Frontend companion project: [`gameHub-FE`](https://github.com/tonipatania/gameHu
 - Neo4j running on `localhost:7687` (Bolt)
 
 Connection settings live in
-[`src/main/resources/application.properties`](gameHub/src/main/resources/application.properties).
+[`src/main/resources/application.properties`](src/main/resources/application.properties).
 With no `SPRING_PROFILES_ACTIVE` set (the local case), the `dev` profile
-([`application-dev.properties`](gameHub/src/main/resources/application-dev.properties)) is active
+([`application-dev.properties`](src/main/resources/application-dev.properties)) is active
 by default and supplies the local Neo4j password (`elliejoel`, matching `docker-compose.yml`) and
 a JWT signing secret for local use only. In production (`SPRING_PROFILES_ACTIVE=prod`, see
 [`DEPLOY.md`](../DEPLOY.md)) neither has a fallback — the app refuses to start unless
@@ -41,7 +43,6 @@ a link can be issued.
 ## Running
 
 ```bash
-cd gameHub
 ./mvnw spring-boot:run
 ```
 
@@ -79,7 +80,7 @@ Relationships:
 | `(User)-[:LIKE]->(Review)` | review likes |
 
 Constraints/indexes (created at startup by
-[`Neo4jIndexInitializer`](gameHub/src/main/java/it/unipi/lsmsd/gamehub/utils/Neo4jIndexInitializer.java)):
+[`Neo4jIndexInitializer`](src/main/java/it/unipi/lsmsd/gamehub/utils/Neo4jIndexInitializer.java)):
 uniqueness constraint on `UserNeo4j.username`, plus indexes on `UserNeo4j.id`, `GameNeo4j.name`,
 `GameNeo4j.id`, `ReviewNeo4j.id`.
 
@@ -98,14 +99,18 @@ A couple of properties of the data worth knowing before writing queries against 
   A minority of reviews have an empty `Title` and are therefore not attributable to any game;
   they're excluded when computing `avgScore` but are otherwise valid rows.
 
-## Importing the dumps
+## Importing a dump (optional)
 
-Dumps for both databases are provided so the app can be tried with realistic data volumes.
+This repo doesn't include a dataset — the original course dump contained real user emails and
+password hashes, so it was never meant to be redistributed from here. Without one, the app still
+runs fine against empty databases (signup/login, reviews, etc. all work; the catalog just starts
+empty). If you have your own MongoDB/Neo4j dumps in the shapes described above, here's how to
+load them.
 
 ### MongoDB
 
-BSON dumps live in [`MongoDBDump/`](MongoDBDump) (`games`, `reviews`, `users`). With a MongoDB
-container named `mongo_local` and the dump copied into `/tmp/dump` inside the container:
+With `games`/`reviews`/`users` BSON dumps, a MongoDB container named `mongo_local`, and the dump
+copied into `/tmp/dump` inside the container:
 
 ```bash
 docker exec -it mongo_local mkdir -p /tmp/dump/game
@@ -119,9 +124,9 @@ pairs.
 
 ### Neo4j
 
-The dump is [`neo4j.dump`](neo4j.dump). `neo4j-admin database load` cannot run against a live
-database, so the target Neo4j container must be stopped and the dump loaded via a disposable
-container mounting the **same** data volume:
+With a `neo4j.dump` file: `neo4j-admin database load` cannot run against a live database, so the
+target Neo4j container must be stopped and the dump loaded via a disposable container mounting
+the **same** data volume:
 
 ```bash
 # 1. Stop the running Neo4j container
@@ -130,7 +135,7 @@ docker stop neo4j_local
 # 2. Load the dump into the same data volume with a throwaway container
 docker run --rm \
   --volume=<path-to-neo4j-data-volume>:/data \
-  --volume=<path-to-this-repo>/LSMSD-Project:/dumps \
+  --volume=<path-to-folder-containing-neo4j.dump>:/dumps \
   neo4j:latest \
   neo4j-admin database load neo4j --from-path=/dumps --overwrite-destination=true
 
