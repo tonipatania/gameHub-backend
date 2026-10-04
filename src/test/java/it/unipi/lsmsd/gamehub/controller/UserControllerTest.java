@@ -1,0 +1,571 @@
+package it.unipi.lsmsd.gamehub.controller;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import it.unipi.lsmsd.gamehub.DTO.CommunityHighlightsDTO;
+import it.unipi.lsmsd.gamehub.DTO.ConnectionDTO;
+import it.unipi.lsmsd.gamehub.DTO.ConnectionStatsDTO;
+import it.unipi.lsmsd.gamehub.model.ConnectionType;
+import it.unipi.lsmsd.gamehub.model.Game;
+import it.unipi.lsmsd.gamehub.model.UserNeo4j;
+import it.unipi.lsmsd.gamehub.security.JwtService;
+import it.unipi.lsmsd.gamehub.security.SecurityConfig;
+import it.unipi.lsmsd.gamehub.security.TokenBlacklistService;
+import it.unipi.lsmsd.gamehub.service.IAccountService;
+import it.unipi.lsmsd.gamehub.service.IActivityService;
+import it.unipi.lsmsd.gamehub.service.ILoginService;
+import it.unipi.lsmsd.gamehub.service.IUserNeo4jService;
+import java.time.Instant;
+import java.util.Date;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
+
+@ExtendWith(SpringExtension.class)
+@WebMvcTest(UserController.class)
+@AutoConfigureMockMvc(addFilters = false)
+// @WebMvcTest doesn't pick up SecurityConfig on its own; without this @Import,
+// @EnableMethodSecurity's infrastructure never gets registered and @PreAuthorize on
+// UserController's admin endpoint silently has no effect in this test context
+@Import(SecurityConfig.class)
+class UserControllerTest {
+
+    @Autowired private MockMvc mockMvc;
+
+    @MockBean private IUserNeo4jService userNeo4jService;
+    @MockBean private ILoginService iLoginService;
+    @MockBean private IActivityService activityService;
+    @MockBean private IAccountService accountService;
+
+    // see LoginControllerTest for why this is required even with addFilters = false
+    @MockBean private JwtService jwtService;
+
+    // JwtAuthenticationFilter (wired through SecurityConfig) also needs a TokenBlacklistService
+    @MockBean private TokenBlacklistService tokenBlacklistService;
+
+    // With addFilters = false, JwtAuthenticationFilter never runs, so
+    // SecurityMockMvcRequestPostProcessors.authentication() (which only bridges into
+    // SecurityContextHolder via a filter) has no effect here - set the real SecurityContextHolder
+    // directly instead, matching the Authentication JwtAuthenticationFilter builds in production
+    // (a plain-String principal with a single ROLE_* authority from the "role" claim). MockMvc
+    // dispatches synchronously on this thread, so @PreAuthorize/@AuthenticationPrincipal in the
+    // controller see it; @AfterEach clears it so it can't leak into the next test.
+    private static RequestPostProcessor asUser(String username) {
+        return request -> {
+            SecurityContextHolder.getContext()
+                    .setAuthentication(
+                            new UsernamePasswordAuthenticationToken(
+                                    username,
+                                    null,
+                                    List.of(new SimpleGrantedAuthority("ROLE_USER"))));
+            return request;
+        };
+    }
+
+    private static RequestPostProcessor asAdmin(String username) {
+        return request -> {
+            SecurityContextHolder.getContext()
+                    .setAuthentication(
+                            new UsernamePasswordAuthenticationToken(
+                                    username,
+                                    null,
+                                    List.of(new SimpleGrantedAuthority("ROLE_ADMIN"))));
+            return request;
+        };
+    }
+
+    @AfterEach
+    void clearSecurityContext() {
+        SecurityContextHolder.clearContext();
+    }
+
+    @Test
+    void getUserWishlist_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.getUserWishlist("Lunark", null)).thenReturn(null);
+
+        mockMvc.perform(get("/user/userSelected/wishlist").param("username", "Lunark"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void getUserWishlist_serviceSucceeds_returnsOkWithList() throws Exception {
+        Game game = new Game();
+        game.setId("g1");
+        when(userNeo4jService.getUserWishlist("Lunark", null)).thenReturn(List.of(game));
+
+        mockMvc.perform(get("/user/userSelected/wishlist").param("username", "Lunark"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void addGameToWishlist_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.addGameToWishlist("Lunark", "BARRIER X")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/wishlist/addWishlistGame")
+                                .with(asUser("Lunark"))
+                                .param("name", "BARRIER X"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void addGameToWishlist_serviceReturnsTrue_returnsGameAdded() throws Exception {
+        when(userNeo4jService.addGameToWishlist("Lunark", "BARRIER X")).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/wishlist/addWishlistGame")
+                                .with(asUser("Lunark"))
+                                .param("name", "BARRIER X"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("game added"));
+    }
+
+    @Test
+    void addGameToWishlist_serviceReturnsFalse_returnsNoGameAdded() throws Exception {
+        when(userNeo4jService.addGameToWishlist("Lunark", "BARRIER X")).thenReturn(false);
+
+        mockMvc.perform(
+                        post("/user/wishlist/addWishlistGame")
+                                .with(asUser("Lunark"))
+                                .param("name", "BARRIER X"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("no game added"));
+    }
+
+    @Test
+    void deleteGameToWishlist_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.deleteGameToWishlist("Lunark", "BARRIER X")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/wishlist/deleteWishlistGame")
+                                .with(asUser("Lunark"))
+                                .param("name", "BARRIER X"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void addLikeToReview_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.addLikeToReview("Lunark", "r1")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/addLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void addLikeToReview_serviceReturnsTrue_returnsAddedLike() throws Exception {
+        when(userNeo4jService.addLikeToReview("Lunark", "r1")).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/addLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("added like"));
+    }
+
+    @Test
+    void addLikeToReview_serviceReturnsFalse_returnsNoAddedLike() throws Exception {
+        when(userNeo4jService.addLikeToReview("Lunark", "r1")).thenReturn(false);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/addLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("no added like"));
+    }
+
+    @Test
+    void removeLikeFromReview_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.removeLikeFromReview("Lunark", "r1")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/removeLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void removeLikeFromReview_serviceReturnsTrue_returnsRemovedLike() throws Exception {
+        when(userNeo4jService.removeLikeFromReview("Lunark", "r1")).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/removeLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("removed like"));
+    }
+
+    @Test
+    void removeLikeFromReview_serviceReturnsFalse_returnsNoRemovedLike() throws Exception {
+        when(userNeo4jService.removeLikeFromReview("Lunark", "r1")).thenReturn(false);
+
+        mockMvc.perform(
+                        post("/user/reviewSelected/removeLikeReview")
+                                .with(asUser("Lunark"))
+                                .param("id", "r1"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("no removed like"));
+    }
+
+    @Test
+    void countGame_callerNotAdmin_returnsForbidden() {
+        // ExceptionTranslationFilter (the piece that turns AccessDeniedException into an HTTP 403)
+        // is part of the Spring Security filter chain, which addFilters = false disables - so this
+        // slice test can only observe @PreAuthorize denying access as the exception itself
+        // propagating out of the DispatcherServlet, not as a 403 response. The real HTTP-level
+        // translation is covered by the e2e suite (SocialGraphJourneyE2EIT), which runs with the
+        // full filter chain.
+        assertThatThrownBy(() -> mockMvc.perform(get("/user/countUser/u1").with(asUser("someone"))))
+                .hasCauseInstanceOf(AccessDeniedException.class);
+
+        verify(userNeo4jService, never()).countUserDocument();
+    }
+
+    @Test
+    void countGame_callerIsAdmin_returnsCount() throws Exception {
+        when(userNeo4jService.countUserDocument()).thenReturn(7L);
+
+        mockMvc.perform(get("/user/countUser/u1").with(asAdmin("someone")))
+                .andExpect(status().isOk())
+                .andExpect(content().string("7"));
+    }
+
+    @Test
+    void followUser_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.followUser("Lunark", "Kaistlin")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/userSelected/follow")
+                                .with(asUser("Lunark"))
+                                .param("followedUsername", "Kaistlin"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void followUser_serviceReturnsTrue_returnsFollowedSuccessfully() throws Exception {
+        when(userNeo4jService.followUser("Lunark", "Kaistlin")).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/userSelected/follow")
+                                .with(asUser("Lunark"))
+                                .param("followedUsername", "Kaistlin"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("Followed successfully"));
+    }
+
+    @Test
+    void unfollowUser_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.unfollowUser("Lunark", "Kaistlin")).thenReturn(null);
+
+        mockMvc.perform(
+                        post("/user/userSelected/unfollow")
+                                .with(asUser("Lunark"))
+                                .param("followedUsername", "Kaistlin"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void unfollowUser_serviceReturnsTrue_returnsUnfollowedSuccessfully() throws Exception {
+        when(userNeo4jService.unfollowUser("Lunark", "Kaistlin")).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/userSelected/unfollow")
+                                .with(asUser("Lunark"))
+                                .param("followedUsername", "Kaistlin"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("Unfollowed successfully"));
+    }
+
+    @Test
+    void updateUser_mongoUpdateFails_doesNotTouchNeo4j() throws Exception {
+        when(iLoginService.updateUser("oldName", "newName"))
+                .thenReturn(new ResponseEntity<>("username already used", HttpStatus.CONFLICT));
+
+        mockMvc.perform(
+                        patch("/user/updateUser")
+                                .with(asUser("oldName"))
+                                .param("newUsername", "newName"))
+                .andExpect(status().isConflict());
+
+        verify(userNeo4jService, never()).updateUser(anyString(), anyString());
+    }
+
+    @Test
+    void updateUser_mongoAndNeo4jSucceed_returnsOk() throws Exception {
+        when(iLoginService.updateUser("oldName", "newName"))
+                .thenReturn(new ResponseEntity<>("username updated in mongo", HttpStatus.OK));
+        when(userNeo4jService.updateUser("oldName", "newName"))
+                .thenReturn(new ResponseEntity<>("username correctly updated", HttpStatus.OK));
+
+        mockMvc.perform(
+                        patch("/user/updateUser")
+                                .with(asUser("oldName"))
+                                .param("newUsername", "newName"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("username correctly updated"));
+    }
+
+    @Test
+    void updateUser_neo4jUpdateFails_rollsBackMongoUsernameAndReturnsFailureMessage()
+            throws Exception {
+        when(iLoginService.updateUser("oldName", "newName"))
+                .thenReturn(new ResponseEntity<>("username updated in mongo", HttpStatus.OK));
+        when(userNeo4jService.updateUser("oldName", "newName"))
+                .thenReturn(new ResponseEntity<>("error", HttpStatus.INTERNAL_SERVER_ERROR));
+        when(iLoginService.updateUser("newName", "oldName"))
+                .thenReturn(new ResponseEntity<>("username updated in mongo", HttpStatus.OK));
+
+        mockMvc.perform(
+                        patch("/user/updateUser")
+                                .with(asUser("oldName"))
+                                .param("newUsername", "newName"))
+                .andExpect(status().isOk())
+                .andExpect(content().string("username update failed, please try again later"));
+
+        // rollback swaps the arguments to restore the original username
+        verify(iLoginService, times(1)).updateUser("newName", "oldName");
+    }
+
+    @Test
+    void getUser_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.getUser("Lunark")).thenReturn(null);
+
+        mockMvc.perform(get("/user/getUser").param("username", "Lunark"))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void getUser_userFound_returnsOkWithBody() throws Exception {
+        when(userNeo4jService.getUser("Lunark")).thenReturn(new UserNeo4j("u1", "Lunark"));
+
+        mockMvc.perform(get("/user/getUser").param("username", "Lunark"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void getUser_userNotFound_returnsEmptyOkBody() throws Exception {
+        UserNeo4j sentinel = new UserNeo4j();
+        sentinel.setId("null");
+        when(userNeo4jService.getUser("Ghost")).thenReturn(sentinel);
+
+        mockMvc.perform(get("/user/getUser").param("username", "Ghost"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(""));
+    }
+
+    // --- feed della Home ----------------------------------------------------------------------
+
+    @Test
+    void getFriendsActivity_usesTheAuthenticatedUserNotAParameter() throws Exception {
+        when(activityService.getFriendsActivity(eq("Lunark"), any()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 15), 0));
+
+        mockMvc.perform(
+                        get("/user/activity/friends")
+                                .param("username", "someoneElse")
+                                .with(asUser("Lunark")))
+                .andExpect(status().isOk());
+
+        verify(activityService).getFriendsActivity(eq("Lunark"), any());
+    }
+
+    @Test
+    void markFriendsActivitySeen_validInstant_returnsNoContent() throws Exception {
+        when(activityService.markFeedSeen(eq("Lunark"), any())).thenReturn(true);
+
+        mockMvc.perform(
+                        post("/user/activity/friends/seen")
+                                .param("upTo", "2026-09-20T10:15:30.123Z")
+                                .with(asUser("Lunark")))
+                .andExpect(status().isNoContent());
+
+        verify(activityService).markFeedSeen("Lunark", Instant.parse("2026-09-20T10:15:30.123Z"));
+    }
+
+    @Test
+    void markFriendsActivitySeen_writeFails_returnsInternalServerError() throws Exception {
+        when(activityService.markFeedSeen(eq("Lunark"), any())).thenReturn(false);
+
+        mockMvc.perform(
+                        post("/user/activity/friends/seen")
+                                .param("upTo", "2026-09-20T10:15:30Z")
+                                .with(asUser("Lunark")))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void markFriendsActivitySeen_malformedInstant_returnsBadRequest() throws Exception {
+        mockMvc.perform(
+                        post("/user/activity/friends/seen")
+                                .param("upTo", "not-a-date")
+                                .with(asUser("Lunark")))
+                .andExpect(status().isBadRequest());
+
+        verify(activityService, never()).markFeedSeen(anyString(), any());
+    }
+
+    @Test
+    void getCommunityHighlights_returnsServiceResult() throws Exception {
+        when(activityService.getCommunityHighlights())
+                .thenReturn(new CommunityHighlightsDTO(List.of(), List.of()));
+
+        mockMvc.perform(get("/user/community/highlights").with(asUser("Lunark")))
+                .andExpect(status().isOk())
+                .andExpect(content().json("{\"trendingReviews\":[],\"hotGames\":[]}"));
+    }
+
+    // --- pagina Community: seguiti / follower / reciproci -----------------------------------
+
+    @Test
+    void getConnectionsPage_followers_usesTheTokenUsernameAndReturnsTheMutualFlag()
+            throws Exception {
+        PageRequest pageable = PageRequest.of(0, 20);
+        when(userNeo4jService.getConnectionsPage(eq("Lunark"), eq(ConnectionType.FOLLOWERS), any()))
+                .thenReturn(
+                        new PageImpl<>(
+                                List.of(new ConnectionDTO("u2", "Kaistlin", true)), pageable, 1));
+
+        mockMvc.perform(
+                        get("/user/connections/page")
+                                .with(asUser("Lunark"))
+                                .param("type", "followers"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].username").value("Kaistlin"))
+                .andExpect(jsonPath("$.content[0].mutual").value(true))
+                .andExpect(jsonPath("$.totalElements").value(1));
+    }
+
+    @Test
+    void getConnectionsPage_noType_defaultsToFollowing() throws Exception {
+        when(userNeo4jService.getConnectionsPage(anyString(), any(), any()))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 20), 0));
+
+        mockMvc.perform(get("/user/connections/page").with(asUser("Lunark")))
+                .andExpect(status().isOk());
+
+        verify(userNeo4jService)
+                .getConnectionsPage(eq("Lunark"), eq(ConnectionType.FOLLOWING), any());
+    }
+
+    @Test
+    void getConnectionsPage_unknownType_returnsBadRequest() throws Exception {
+        mockMvc.perform(
+                        get("/user/connections/page")
+                                .with(asUser("Lunark"))
+                                .param("type", "enemies"))
+                .andExpect(status().isBadRequest());
+
+        verify(userNeo4jService, never()).getConnectionsPage(anyString(), any(), any());
+    }
+
+    @Test
+    void getConnectionStats_returnsTheThreeCounts() throws Exception {
+        when(userNeo4jService.getConnectionStats("Lunark"))
+                .thenReturn(new ConnectionStatsDTO(10, 7, 4));
+
+        mockMvc.perform(get("/user/connections/stats").with(asUser("Lunark")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.following").value(10))
+                .andExpect(jsonPath("$.followers").value(7))
+                .andExpect(jsonPath("$.mutual").value(4));
+    }
+
+    @Test
+    void getConnectionStats_serviceReturnsNull_returnsInternalServerError() throws Exception {
+        when(userNeo4jService.getConnectionStats("Lunark")).thenReturn(null);
+
+        mockMvc.perform(get("/user/connections/stats").with(asUser("Lunark")))
+                .andExpect(status().isInternalServerError());
+    }
+
+    @Test
+    void deleteAccount_serviceSucceeds_returnsOkAndRevokesCurrentToken() throws Exception {
+        when(accountService.deleteAccount("mario", "Password1!"))
+                .thenReturn(new ResponseEntity<>("Account eliminato", HttpStatus.OK));
+        Claims claims =
+                Jwts.claims()
+                        .id("jti-1")
+                        .expiration(new Date(System.currentTimeMillis() + 60_000))
+                        .build();
+        when(jwtService.parseToken("tok")).thenReturn(claims);
+
+        mockMvc.perform(
+                        delete("/user/account")
+                                .with(asUser("mario"))
+                                .header("Authorization", "Bearer tok")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"password\":\"Password1!\"}"))
+                .andExpect(status().isOk());
+
+        verify(tokenBlacklistService).revoke(eq("jti-1"), anyLong());
+    }
+
+    @Test
+    void deleteAccount_wrongPassword_returnsForbiddenAndKeepsTokenValid() throws Exception {
+        when(accountService.deleteAccount("mario", "wrong"))
+                .thenReturn(new ResponseEntity<>("Password non corretta", HttpStatus.FORBIDDEN));
+
+        mockMvc.perform(
+                        delete("/user/account")
+                                .with(asUser("mario"))
+                                .header("Authorization", "Bearer tok")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"password\":\"wrong\"}"))
+                .andExpect(status().isForbidden());
+
+        verify(tokenBlacklistService, never()).revoke(anyString(), anyLong());
+    }
+
+    @Test
+    void deleteAccount_missingPassword_returnsBadRequestWithoutCallingService() throws Exception {
+        mockMvc.perform(
+                        delete("/user/account")
+                                .with(asUser("mario"))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{}"))
+                .andExpect(status().isBadRequest());
+
+        verify(accountService, never()).deleteAccount(anyString(), anyString());
+    }
+}

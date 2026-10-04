@@ -1,0 +1,117 @@
+package it.unipi.lsmsd.gamehub.controller;
+
+import it.unipi.lsmsd.gamehub.DTO.ReplyRequestDTO;
+import it.unipi.lsmsd.gamehub.DTO.ReviewDTO;
+import it.unipi.lsmsd.gamehub.model.Review;
+import it.unipi.lsmsd.gamehub.model.ReviewReply;
+import it.unipi.lsmsd.gamehub.service.IActivityService;
+import it.unipi.lsmsd.gamehub.service.IReviewNeo4jService;
+import it.unipi.lsmsd.gamehub.service.IReviewReplyService;
+import it.unipi.lsmsd.gamehub.service.IReviewService;
+import java.util.List;
+import java.util.Map;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.*;
+
+@RequestMapping("review")
+@RestController
+@Slf4j
+public class ReviewController {
+    @Autowired private IReviewService review2Service;
+
+    @Autowired private IReviewNeo4jService reviewNeo4jService;
+    @Autowired private IActivityService activityService;
+    @Autowired private IReviewReplyService replyService;
+
+    /*Postman parameters
+    {
+        "title":"BARRIER X",
+            "username":"Kaistlin",
+            "comment":"Amazing",
+            "userScore":8
+    }*/
+    @PostMapping("/gameSelected/create")
+    public ResponseEntity<String> createGame(
+            @AuthenticationPrincipal String username, @RequestBody ReviewDTO reviewDTO) {
+        // l'autore della review e' sempre l'utente autenticato: un username diverso nel body
+        // permetterebbe di pubblicare recensioni a nome di chiunque
+        reviewDTO.setUsername(username);
+        // creo review in mongo
+        Review review = review2Service.createReview(reviewDTO);
+        if (review == null) {
+            log.error("Errore nella creazione della review per il gioco {}", reviewDTO.getTitle());
+            return new ResponseEntity<>("error in review creation", HttpStatus.OK);
+        }
+        // creo su neo4j
+        ResponseEntity<String> response = reviewNeo4jService.createReview(review.getId());
+        if (response.getStatusCode() == HttpStatus.CREATED) {
+            // registrata solo ora che la review esiste in entrambi gli store: se la review viene
+            // poi rollbackata sotto (Neo4j fallito) non deve comparire nel feed
+            activityService.recordReview(
+                    reviewDTO.getUsername(),
+                    reviewDTO.getTitle(),
+                    review.getId(),
+                    reviewDTO.getUserScore());
+            return response;
+        }
+        // cancellare review in mongo
+        log.error(
+                "Creazione della review {} fallita in Neo4j, rollback del documento Mongo",
+                review.getId());
+        return review2Service.deleteReview(review.getId());
+    }
+
+    @DeleteMapping("/reviewSelected/delete/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<String> deleteGame(
+            @PathVariable String userId, @RequestParam String reviewId) {
+        // cancello su mongo
+        ResponseEntity<String> responseEntity = review2Service.deleteReview(reviewId);
+        if (responseEntity.getStatusCode() != HttpStatus.OK) {
+            return responseEntity;
+        }
+        // cancello anche in neo4j
+        return reviewNeo4jService.removeReview(reviewId);
+    }
+
+    // risposta a una recensione altrui: l'autore e' sempre l'utente del token e non si puo'
+    // rispondere alla propria recensione (403)
+    @PostMapping("/reply")
+    public ResponseEntity<Object> createReply(
+            @AuthenticationPrincipal String username, @RequestBody ReplyRequestDTO request) {
+        return replyService.createReply(username, request);
+    }
+
+    // una singola recensione: la pagina del gioco ne mostra solo le piu' votate, quindi chi arriva
+    // da una notifica potrebbe puntare a una che non e' tra quelle caricate
+    @GetMapping("/{id}")
+    public ResponseEntity<Review> getReview(@PathVariable String id) {
+        return review2Service
+                .getReview(id)
+                .map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    @GetMapping("/replies")
+    public ResponseEntity<List<ReviewReply>> getReplies(@RequestParam String reviewId) {
+        return ResponseEntity.ok(replyService.getReplies(reviewId));
+    }
+
+    // conteggi per un gruppo di recensioni in una sola chiamata: la pagina di un gioco mostra
+    // "N risposte" su ogni card senza scaricare i thread
+    @GetMapping("/replies/counts")
+    public ResponseEntity<Map<String, Long>> getReplyCounts(@RequestParam List<String> ids) {
+        return ResponseEntity.ok(replyService.countReplies(ids));
+    }
+
+    @DeleteMapping("/reply/{replyId}")
+    public ResponseEntity<String> deleteReply(
+            @AuthenticationPrincipal String username, @PathVariable String replyId) {
+        return replyService.deleteReply(replyId, username);
+    }
+}

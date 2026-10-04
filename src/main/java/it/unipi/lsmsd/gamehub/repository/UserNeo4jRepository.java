@@ -1,0 +1,243 @@
+package it.unipi.lsmsd.gamehub.repository;
+
+import it.unipi.lsmsd.gamehub.DTO.ConnectionDTO;
+import it.unipi.lsmsd.gamehub.DTO.SuggestedUserDTO;
+import it.unipi.lsmsd.gamehub.DTO.UserStatsDTO;
+import it.unipi.lsmsd.gamehub.model.GameNeo4j;
+import it.unipi.lsmsd.gamehub.model.UserNeo4j;
+import java.util.List;
+import org.springframework.data.neo4j.repository.Neo4jRepository;
+import org.springframework.data.neo4j.repository.query.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface UserNeo4jRepository extends Neo4jRepository<UserNeo4j, String> {
+
+    // DA MODIFICARE NEL MAIN->TROVA LA LISTA DI GIOCHI DEGLI AMICI
+    @Query(
+            "MATCH (u:UserNeo4j)-[:ADD]->(g:GameNeo4j) WHERE u.username = $username RETURN g.id as id, g.name as name")
+    List<GameNeo4j> findByUsername(@Param("username") String username);
+
+    @Query("MATCH (u:UserNeo4j {username: $username})-[:ADD]->(g:GameNeo4j) RETURN count(g)")
+    long countWishlist(@Param("username") String username);
+
+    // giochi presenti in entrambe le wishlist: e' lo stesso criterio con cui la Home calcola
+    // "giochi in comune", cosi la card dei suggerimenti e il profilo raccontano la stessa cosa
+    @Query(
+            "MATCH (:UserNeo4j {username: $username})-[:ADD]->(g:GameNeo4j)"
+                    + "<-[:ADD]-(:UserNeo4j {username: $friendUsername}) "
+                    + "RETURN DISTINCT g.id AS id, g.name AS name ORDER BY g.name")
+    List<GameNeo4j> findCommonWishlistGames(
+            @Param("username") String username, @Param("friendUsername") String friendUsername);
+
+    // Il gioco va selezionato prima del MERGE: con un nome duplicato il MATCH restituisce piu nodi
+    // e il MERGE creerebbe una relazione ADD verso ognuno, mettendo in wishlist giochi che l'utente
+    // non ha scelto. Stesso ORDER BY di findGameByName per colpire lo stesso nodo.
+    @Query(
+            "MATCH (g:GameNeo4j {name: $name}) WITH g ORDER BY g.id LIMIT 1 "
+                    + "MATCH (u:UserNeo4j {username: $username}) MERGE (u)-[:ADD]->(g)")
+    void addGameToUser(@Param("username") String username, @Param("name") String name);
+
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[r:ADD]->(g:GameNeo4j {name: $name}) DELETE r")
+    void deleteGameFromUser(@Param("username") String username, @Param("name") String name);
+
+    @Query(
+            "MATCH (u:UserNeo4j)-[:FOLLOW]->(following:UserNeo4j) WHERE u.username = $username RETURN following")
+    List<UserNeo4j> findFollowedUsers(@Param("username") String username);
+
+    @Query(
+            "MATCH (u:UserNeo4j) WHERE toLower(u.username) CONTAINS toLower($query) "
+                    + "AND u.username <> $currentUsername RETURN u ORDER BY u.username LIMIT 20")
+    List<UserNeo4j> searchUsers(
+            @Param("query") String query, @Param("currentUsername") String currentUsername);
+
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:FOLLOW]->()-[:FOLLOW]->(friends) RETURN DISTINCT friends;")
+    List<UserNeo4j> findFriendsOfFriends(@Param("username") String username);
+
+    // Livello 1: amici di amici non ancora seguiti, con almeno 5 giochi in comune in wishlist.
+    // Computed entirely in a single Cypher query to avoid per-candidate round trips.
+    // Ogni RETURN proietta tutte le proprieta' di SuggestedUserDTO (anche quelle non pertinenti,
+    // come null/0): un campo assente dal record fa emettere a DtoInstantiatingConverter un warning
+    // "Cannot retrieve a value for property ..." per ogni riga risultante.
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:ADD]->(g:GameNeo4j) "
+                    + "WITH u, collect(g) AS myGames "
+                    + "MATCH (u)-[:FOLLOW]->()-[:FOLLOW]->(candidate:UserNeo4j) "
+                    + "WHERE candidate <> u AND NOT (u)-[:FOLLOW]->(candidate) "
+                    + "MATCH (candidate)-[:ADD]->(cg:GameNeo4j) WHERE cg IN myGames "
+                    + "WITH candidate, count(DISTINCT cg) AS commonGames "
+                    + "WHERE commonGames >= 5 "
+                    + "RETURN candidate.id AS id, candidate.username AS username, "
+                    + "'COMMON_FRIENDS' AS reason, commonGames AS commonGames, 0 AS followers "
+                    + "ORDER BY commonGames DESC LIMIT $limit")
+    List<SuggestedUserDTO> findSuggestedFriends(
+            @Param("username") String username, @Param("limit") int limit);
+
+    // Livello 2: chiunque non ancora seguito condivida giochi in wishlist, anche fuori dalla
+    // rete di follow. Copre il caso di utenti che non seguono ancora nessuno.
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:ADD]->(g:GameNeo4j)<-[:ADD]-(candidate:UserNeo4j) "
+                    + "WHERE candidate <> u AND NOT (u)-[:FOLLOW]->(candidate) "
+                    + "WITH candidate, count(DISTINCT g) AS commonGames "
+                    + "RETURN candidate.id AS id, candidate.username AS username, "
+                    + "'SIMILAR_TASTES' AS reason, commonGames AS commonGames, 0 AS followers "
+                    + "ORDER BY commonGames DESC LIMIT $limit")
+    List<SuggestedUserDTO> findUsersWithSimilarTastes(
+            @Param("username") String username, @Param("limit") int limit);
+
+    // Livello 3: utenti piu seguiti della rete. Fallback che non e mai vuoto finche esiste almeno
+    // una relazione FOLLOW nel grafo. La classifica e' globale (non dipende da chi la chiede), per
+    // questo non filtra qui l'utente corrente: il filtro lo applica il service sul risultato in
+    // cache, cosi la scansione di tutte le relazioni FOLLOW avviene una volta sola e non a ogni
+    // caricamento della home.
+    @Query(
+            "MATCH (candidate:UserNeo4j)<-[:FOLLOW]-() "
+                    + "WITH candidate, count(*) AS followers "
+                    + "RETURN candidate.id AS id, candidate.username AS username, "
+                    + "'POPULAR' AS reason, 0 AS commonGames, followers AS followers "
+                    + "ORDER BY followers DESC LIMIT $limit")
+    List<SuggestedUserDTO> findMostFollowedUsers(@Param("limit") int limit);
+
+    @Query(
+            "MATCH (u:UserNeo4j)-[:FOLLOW]->(following:UserNeo4j) WHERE u.username = $username "
+                    + "RETURN following ORDER BY following.username SKIP $skip LIMIT $limit")
+    List<UserNeo4j> findFollowedUsersPage(
+            @Param("username") String username,
+            @Param("skip") long skip,
+            @Param("limit") long limit);
+
+    @Query(
+            "MATCH (u:UserNeo4j)-[:FOLLOW]->(following:UserNeo4j) WHERE u.username = $username RETURN count(following)")
+    long countFollowedUsers(@Param("username") String username);
+
+    // Elenchi della pagina Community. Ogni riga dice anche se la relazione e' reciproca
+    // (OPTIONAL MATCH sul verso opposto), cosi la card mostra "ti segue anche" senza una query per
+    // riga. Come per SuggestedUserDTO, ogni RETURN proietta tutte le proprieta' del DTO.
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:FOLLOW]->(f:UserNeo4j) "
+                    + "OPTIONAL MATCH (f)-[m:FOLLOW]->(u) "
+                    + "RETURN f.id AS id, f.username AS username, m IS NOT NULL AS mutual "
+                    + "ORDER BY f.username SKIP $skip LIMIT $limit")
+    List<ConnectionDTO> findFollowingConnections(
+            @Param("username") String username,
+            @Param("skip") long skip,
+            @Param("limit") long limit);
+
+    @Query(
+            "MATCH (f:UserNeo4j)-[:FOLLOW]->(u:UserNeo4j {username: $username}) "
+                    + "OPTIONAL MATCH (u)-[m:FOLLOW]->(f) "
+                    + "RETURN f.id AS id, f.username AS username, m IS NOT NULL AS mutual "
+                    + "ORDER BY f.username SKIP $skip LIMIT $limit")
+    List<ConnectionDTO> findFollowerConnections(
+            @Param("username") String username,
+            @Param("skip") long skip,
+            @Param("limit") long limit);
+
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:FOLLOW]->(f:UserNeo4j)-[:FOLLOW]->(u) "
+                    + "RETURN f.id AS id, f.username AS username, true AS mutual "
+                    + "ORDER BY f.username SKIP $skip LIMIT $limit")
+    List<ConnectionDTO> findMutualConnections(
+            @Param("username") String username,
+            @Param("skip") long skip,
+            @Param("limit") long limit);
+
+    @Query("MATCH (f:UserNeo4j)-[:FOLLOW]->(u:UserNeo4j {username: $username}) RETURN count(f)")
+    long countFollowers(@Param("username") String username);
+
+    @Query(
+            "MATCH (u:UserNeo4j {username: $username})-[:FOLLOW]->(f:UserNeo4j)-[:FOLLOW]->(u) "
+                    + "RETURN count(f)")
+    long countMutualFollows(@Param("username") String username);
+
+    // fra i candidati, quelli che l'utente segue gia': la lista notifiche la usa per non proporre
+    // "Segui anche tu" a chi e' gia' seguito, senza una query per notifica
+    @Query(
+            "MATCH (:UserNeo4j {username: $username})-[:FOLLOW]->(f:UserNeo4j) "
+                    + "WHERE f.username IN $candidates RETURN f.username")
+    List<String> findFollowedAmong(
+            @Param("username") String username, @Param("candidates") List<String> candidates);
+
+    // DA MODIFICARE NEL MAIN->AGGIUNGE LIKE AD UNA REVIEW
+    @Query(
+            "MATCH (u:UserNeo4j {username:$username}), (g:ReviewNeo4j {id: $id}) "
+                    + "OPTIONAL MATCH (u)-[r:LIKE]->(g) WITH u, g, r MERGE (u)-[:LIKE]->(g) "
+                    + "RETURN r IS NOT NULL AS relationshipExists")
+    Boolean addLikeToReview(@Param("username") String username, @Param("id") String id);
+
+    @Query(
+            "MATCH (user:UserNeo4j{username:$username})-[like:LIKE]->(review:ReviewNeo4j{id: $id}) DELETE like")
+    void deleteLikeFromReview(@Param("username") String username, @Param("id") String id);
+
+    // rimuove il like e dice se il like esisteva davvero
+    @Query(
+            "MATCH (user:UserNeo4j{username:$username})-[like:LIKE]->(review:ReviewNeo4j{id: $id}) DELETE like RETURN count(like) AS removed")
+    Long removeLikeFromReview(@Param("username") String username, @Param("id") String id);
+
+    // id delle review a cui l'utente ha messo like. LIMIT come rete di sicurezza: la lista serve
+    // solo a costruire il set client-side "ho gia' messo like a questa review" (vedi
+    // ReviewService.loadLikedReviews sul frontend), quindi un taglio oltre questa soglia e'
+    // impercettibile ma protegge da un payload sconfinato per un utente che ha messo like a
+    // moltissime review.
+    @Query(
+            "MATCH (user:UserNeo4j{username:$username})-[:LIKE]->(review:ReviewNeo4j) RETURN review.id LIMIT 5000")
+    List<String> findLikedReviewIds(@Param("username") String username);
+
+    // true se l'utente seguiva gia': serve a registrare l'attivita' "ha iniziato a seguire" solo
+    // alla prima volta, come per addLikeToReview
+    @Query(
+            "MATCH (a:UserNeo4j {username: $followerUsername}), (b:UserNeo4j {username: $followedUsername}) "
+                    + "OPTIONAL MATCH (a)-[r:FOLLOW]->(b) WITH a, b, r MERGE (a)-[:FOLLOW]->(b) "
+                    + "RETURN r IS NOT NULL AS relationshipExists")
+    Boolean followUser(String followerUsername, String followedUsername);
+
+    @Query(
+            "MATCH (a:UserNeo4j {username: $followerUsername})-[r:FOLLOW]->(b:UserNeo4j {username: $followedUsername}) DELETE r")
+    void unfollowUser(String followerUsername, String followedUsername);
+
+    // Method to remove a like based on username and game ID
+    @Query("MATCH (a:UserNeo4j) WHERE a.username = $username DELETE a")
+    void removeUser(String username);
+
+    // cancellazione dell'account: a differenza di removeUser (usato solo per il rollback di una
+    // registrazione appena fatta, quando il nodo non ha ancora relazioni) qui il nodo ha
+    // FOLLOW/ADD/LIKE, e un DELETE semplice fallirebbe. Il dump contiene username duplicati, quindi
+    // la MATCH puo' restituire piu' nodi: vanno eliminati tutti.
+    @Query("MATCH (a:UserNeo4j {username: $username}) DETACH DELETE a")
+    void deleteUserWithRelationships(@Param("username") String username);
+
+    // cancellazione dell'account: trova E rimuove in una sola query, atomicamente, tutte le
+    // relazioni LIKE date dall'utente (senza LIMIT: vanno azzerate tutte, non solo le prime 5000
+    // come findLikedReviewIds). La cancellazione della relazione qui, invece che nel DETACH DELETE
+    // finale del nodo utente, e' cio' che rende il passo idempotente: se il resto della
+    // cancellazione account fallisce dopo questa chiamata e l'utente ritenta, la relazione non
+    // c'e' piu' e il likeCount su Mongo (decrementato subito dopo, in AccountService) non viene
+    // decrementato una seconda volta per lo stesso like.
+    @Query(
+            "MATCH (a:UserNeo4j {username: $username})-[l:LIKE]->(r:ReviewNeo4j) DELETE l RETURN r.id")
+    List<String> consumeAllLikedReviewIds(@Param("username") String username);
+
+    // @Query("MATCH (a:UserNeo4j) WHERE a.username = '$username' DELETE a")
+    @Query("CREATE (a:UserNeo4j {id: $id, username: $username})")
+    void addUser(String id, String username);
+
+    @Query("MATCH (a:UserNeo4j {username: $username}) RETURN a")
+    UserNeo4j getUser(String username);
+
+    // numeri di piu' utenti in una sola query (la card "ha iniziato a seguire" nel feed ne mostra
+    // fino a una pagina intera). OPTIONAL MATCH + count invece di size(pattern), che Neo4j 5 non
+    // accetta piu'.
+    @Query(
+            "MATCH (u:UserNeo4j) WHERE u.username IN $usernames "
+                    + "OPTIONAL MATCH (u)-[a:ADD]->() WITH u, count(a) AS wishlistCount "
+                    + "OPTIONAL MATCH (u)<-[f:FOLLOW]-() "
+                    + "RETURN u.username AS username, wishlistCount AS wishlistCount, "
+                    + "count(f) AS followers")
+    List<UserStatsDTO> findUserStats(@Param("usernames") List<String> usernames);
+
+    @Query("MATCH (a:UserNeo4j {username: $username}) SET a.username = $newUsername")
+    void updateUser(String username, String newUsername);
+}

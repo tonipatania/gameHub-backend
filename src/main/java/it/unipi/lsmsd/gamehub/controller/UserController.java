@@ -1,0 +1,355 @@
+package it.unipi.lsmsd.gamehub.controller;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
+import it.unipi.lsmsd.gamehub.DTO.ActivityDTO;
+import it.unipi.lsmsd.gamehub.DTO.CommunityHighlightsDTO;
+import it.unipi.lsmsd.gamehub.DTO.ConnectionDTO;
+import it.unipi.lsmsd.gamehub.DTO.ConnectionStatsDTO;
+import it.unipi.lsmsd.gamehub.DTO.DeleteAccountDTO;
+import it.unipi.lsmsd.gamehub.DTO.SuggestedUserDTO;
+import it.unipi.lsmsd.gamehub.model.ConnectionType;
+import it.unipi.lsmsd.gamehub.model.Game;
+import it.unipi.lsmsd.gamehub.model.GameNeo4j;
+import it.unipi.lsmsd.gamehub.model.UserNeo4j;
+import it.unipi.lsmsd.gamehub.security.JwtService;
+import it.unipi.lsmsd.gamehub.security.TokenBlacklistService;
+import it.unipi.lsmsd.gamehub.service.IAccountService;
+import it.unipi.lsmsd.gamehub.service.IActivityService;
+import it.unipi.lsmsd.gamehub.service.ILoginService;
+import it.unipi.lsmsd.gamehub.service.IUserNeo4jService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
+import java.time.Instant;
+import java.util.List;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.*;
+
+@RequestMapping("user")
+@RestController
+@Slf4j
+public class UserController {
+    @Autowired private IUserNeo4jService userNeo4jService;
+    @Autowired private ILoginService iLoginService;
+    @Autowired private IActivityService activityService;
+    @Autowired private IAccountService accountService;
+    @Autowired private JwtService jwtService;
+    @Autowired private TokenBlacklistService tokenBlacklistService;
+
+    // to load games from mongo to neo4j
+    @PostMapping("/loadgames")
+    public ResponseEntity<String> reqGames() {
+        userNeo4jService.loadGames();
+        return ResponseEntity.ok("Giochi caricati");
+    }
+
+    @GetMapping("userSelected/wishlist")
+    public ResponseEntity<Object> getUserWishlist(
+            @RequestParam String username, @RequestParam(required = false) String friendUsername) {
+        List<Game> gameList = userNeo4jService.getUserWishlist(username, friendUsername);
+        if (gameList != null) {
+            // always a JSON array, even when empty: a plain-text "empty" message here is not
+            // valid JSON, and Angular's HttpClient turns an unparseable 200 body into an error
+            return ResponseEntity.ok(gameList);
+        }
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // variante paginata usata dal profilo di un altro utente, per non caricare in un colpo solo
+    // wishlist che possono contenere decine di giochi
+    @GetMapping("userSelected/wishlist/page")
+    public ResponseEntity<Page<Game>> getUserWishlistPage(
+            @RequestParam String username,
+            @RequestParam(required = false) String friendUsername,
+            @RequestParam(defaultValue = "name") String sort,
+            @RequestParam(defaultValue = "false") boolean onlyCommon,
+            @PageableDefault(size = 12) Pageable pageable) {
+        return ResponseEntity.ok(
+                userNeo4jService.getUserWishlistPage(
+                        username, friendUsername, pageable, sort, onlyCommon));
+    }
+
+    // giochi che il visitatore ha in comune con il profilo che sta guardando
+    @GetMapping("userSelected/wishlist/common")
+    public ResponseEntity<List<GameNeo4j>> getCommonWishlistGames(
+            @RequestParam String username, @RequestParam String friendUsername) {
+        return ResponseEntity.ok(userNeo4jService.getCommonWishlistGames(username, friendUsername));
+    }
+
+    // cambiato path
+    // username va sempre preso dal token, mai da un parametro client: altrimenti chiunque puo'
+    // modificare la wishlist di un altro utente passando uno username a piacere
+    @PostMapping("wishlist/addWishlistGame")
+    public ResponseEntity<String> addGameToWishlist(
+            @AuthenticationPrincipal String username, String name) {
+        Boolean result = userNeo4jService.addGameToWishlist(username, name);
+        // il service torna null quando la query fallisce: il null va intercettato prima di ogni
+        // uso come boolean, altrimenti l'unboxing solleva NullPointerException e il ramo 500
+        // qui sotto resta irraggiungibile
+        if (result == null) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+        if (result) {
+            return ResponseEntity.ok("game added");
+        }
+        return ResponseEntity.ok("no game added");
+    }
+
+    // cambiato path
+    @PostMapping("wishlist/deleteWishlistGame")
+    public ResponseEntity<String> deleteGameToWishlist(
+            @AuthenticationPrincipal String username, String name) {
+        Boolean result = userNeo4jService.deleteGameToWishlist(username, name);
+        if (result == null) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+        if (result) {
+            return ResponseEntity.ok("eliminated game");
+        }
+        return ResponseEntity.ok("no eliminated game");
+    }
+
+    @GetMapping("/followedUser")
+    public ResponseEntity<Object> getFollowedUser(@RequestParam String username) {
+        List<UserNeo4j> usersList = userNeo4jService.getFollowedUser(username);
+        if (usersList != null) {
+            return ResponseEntity.ok(usersList);
+        }
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // paginated variant used by the Community page, to avoid loading the full followed-users list
+    // at once
+    @GetMapping("/followedUser/page")
+    public ResponseEntity<Page<UserNeo4j>> getFollowedUserPage(
+            @RequestParam String username, @PageableDefault(size = 20) Pageable pageable) {
+        return ResponseEntity.ok(userNeo4jService.getFollowedUserPage(username, pageable));
+    }
+
+    // elenchi della pagina Community: chi seguo, chi mi segue, chi ci segue a vicenda. L'utente e'
+    // quello del token (sono i "miei" contatti), type = following | followers | mutual
+    @GetMapping("/connections/page")
+    public ResponseEntity<Page<ConnectionDTO>> getConnectionsPage(
+            @AuthenticationPrincipal String username,
+            @RequestParam(defaultValue = "following") String type,
+            @PageableDefault(size = 20) Pageable pageable) {
+        ConnectionType connectionType = ConnectionType.parse(type);
+        if (connectionType == null) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(
+                userNeo4jService.getConnectionsPage(username, connectionType, pageable));
+    }
+
+    @GetMapping("/connections/stats")
+    public ResponseEntity<ConnectionStatsDTO> getConnectionStats(
+            @AuthenticationPrincipal String username) {
+        ConnectionStatsDTO stats = userNeo4jService.getConnectionStats(username);
+        if (stats == null) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+        return ResponseEntity.ok(stats);
+    }
+
+    // feed della Home: cosa hanno fatto di recente le persone seguite (wishlist, recensioni, like,
+    // nuovi follow), piu' recenti prima. Ogni voce dice se e' nuova rispetto all'ultima volta che
+    // l'utente ha visto il feed, quindi l'utente e' sempre quello autenticato, mai un parametro.
+    @GetMapping("/activity/friends")
+    public ResponseEntity<Page<ActivityDTO>> getFriendsActivity(
+            @AuthenticationPrincipal String username,
+            @PageableDefault(size = 15) Pageable pageable) {
+        return ResponseEntity.ok(activityService.getFriendsActivity(username, pageable));
+    }
+
+    // il client lo chiama quando l'utente ha davvero guardato le novita' (vedi HomeComponent):
+    // upTo e' l'istante dell'attivita' piu' recente vista
+    @PostMapping("/activity/friends/seen")
+    public ResponseEntity<Void> markFriendsActivitySeen(
+            @AuthenticationPrincipal String username,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant upTo) {
+        if (activityService.markFeedSeen(username, upTo)) {
+            return ResponseEntity.noContent().build();
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // recensioni in tendenza e giochi piu' desiderati, uguali per tutti gli utenti
+    @GetMapping("/community/highlights")
+    public ResponseEntity<CommunityHighlightsDTO> getCommunityHighlights() {
+        return ResponseEntity.ok(activityService.getCommunityHighlights());
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<Object> searchUsers(
+            @RequestParam String query, @RequestParam String username) {
+        List<UserNeo4j> usersList = userNeo4jService.searchUsers(query, username);
+        if (usersList != null) {
+            return ResponseEntity.ok(usersList);
+        }
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @GetMapping("/SuggestFriends")
+    public ResponseEntity<Object> getSuggestFriends(@RequestParam String username) {
+        List<SuggestedUserDTO> userNeo4jList = userNeo4jService.getSuggestedFriends(username);
+        if (userNeo4jList != null) {
+            return ResponseEntity.ok(userNeo4jList);
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @PostMapping("/reviewSelected/addLikeReview")
+    public ResponseEntity<String> addLikeToReview(
+            @AuthenticationPrincipal String username, String id) {
+        Boolean likeAdded = userNeo4jService.addLikeToReview(username, id);
+        if (id != null && likeAdded != null && likeAdded) {
+            return ResponseEntity.ok("added like");
+        } else if (id != null && likeAdded != null) {
+            return ResponseEntity.ok("no added like");
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @PostMapping("/reviewSelected/removeLikeReview")
+    public ResponseEntity<String> removeLikeFromReview(
+            @AuthenticationPrincipal String username, String id) {
+        Boolean likeRemoved = userNeo4jService.removeLikeFromReview(username, id);
+        if (id != null && likeRemoved != null && likeRemoved) {
+            return ResponseEntity.ok("removed like");
+        } else if (id != null && likeRemoved != null) {
+            return ResponseEntity.ok("no removed like");
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @GetMapping("/reviewSelected/likedReviews")
+    public ResponseEntity<Object> getLikedReviews(@RequestParam String username) {
+        List<String> reviewIds = userNeo4jService.getLikedReviewIds(username);
+        if (reviewIds != null) {
+            return ResponseEntity.ok(reviewIds);
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // funzione admin: il ruolo va verificato sull'utente autenticato (claim del JWT), non su uno
+    // userId nel path, altrimenti basta conoscere l'id di un admin per ottenere i suoi permessi
+    @GetMapping("/countUser/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Object> countGame(@PathVariable String userId) {
+        long count = userNeo4jService.countUserDocument();
+        return ResponseEntity.ok(count);
+    }
+
+    // cambiato path
+    // followerUsername va sempre preso dal token: e' l'utente che sta compiendo l'azione
+    @PostMapping("userSelected/follow")
+    public ResponseEntity<String> followUser(
+            @AuthenticationPrincipal String followerUsername,
+            @RequestParam String followedUsername) {
+        Boolean result = userNeo4jService.followUser(followerUsername, followedUsername);
+        if (result != null && result) {
+            return ResponseEntity.ok("Followed successfully");
+        } else if (result != null) {
+            return ResponseEntity.ok("Followed not successfully");
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // cambiato path
+    @PostMapping("userSelected/unfollow")
+    public ResponseEntity<String> unfollowUser(
+            @AuthenticationPrincipal String followerUsername,
+            @RequestParam String followedUsername) {
+        Boolean result = userNeo4jService.unfollowUser(followerUsername, followedUsername);
+        if (result != null && result) {
+            return ResponseEntity.ok("Unfollowed successfully");
+        } else if (result != null) {
+            return ResponseEntity.ok("Unfollowed not successfully");
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    // update username on the basis of old username
+    // username (l'account da rinominare) va sempre preso dal token: altrimenti chiunque
+    // autenticato puo' rinominare un account a piacere passando il suo username come parametro
+    @PatchMapping("/updateUser")
+    public ResponseEntity<String> updateUser(
+            @AuthenticationPrincipal String username, @RequestParam String newUsername) {
+        // aggiorno utente su mongo
+        ResponseEntity<String> responseEntity = iLoginService.updateUser(username, newUsername);
+        if (responseEntity.getStatusCode() != HttpStatus.OK) {
+            return responseEntity;
+        }
+        // aggiorno su neo4j
+        ResponseEntity<String> response = userNeo4jService.updateUser(username, newUsername);
+        if (response.getStatusCode() == HttpStatus.OK) {
+            return response;
+        }
+        // se fallisce riporto l username allo stato iniziale
+        log.error(
+                "Aggiornamento username fallito in Neo4j per {} -> {}, rollback su Mongo",
+                username,
+                newUsername);
+        responseEntity = iLoginService.updateUser(newUsername, username);
+        return ResponseEntity.status(responseEntity.getStatusCode())
+                .body("username update failed, please try again later");
+    }
+
+    // Cancellazione dell'account: l'utente e' sempre quello del token (mai un parametro, altrimenti
+    // chiunque potrebbe eliminare account altrui) e deve riconfermare la password. A cancellazione
+    // avvenuta il token corrente viene revocato: resterebbe altrimenti valido fino a scadenza.
+    @DeleteMapping("/account")
+    public ResponseEntity<String> deleteAccount(
+            @AuthenticationPrincipal String username,
+            @Valid @RequestBody DeleteAccountDTO deleteAccountDTO,
+            HttpServletRequest request) {
+        ResponseEntity<String> response =
+                accountService.deleteAccount(username, deleteAccountDTO.getPassword());
+        if (response.getStatusCode() == HttpStatus.OK) {
+            revokeCurrentToken(request);
+        }
+        return response;
+    }
+
+    private void revokeCurrentToken(HttpServletRequest request) {
+        String header = request.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer ")) {
+            return;
+        }
+        try {
+            Claims claims = jwtService.parseToken(header.substring(7));
+            long remainingMs = claims.getExpiration().getTime() - System.currentTimeMillis();
+            tokenBlacklistService.revoke(claims.getId(), remainingMs);
+        } catch (JwtException e) {
+            log.debug("Token non revocabile dopo l'eliminazione dell'account: {}", e.getMessage());
+        }
+    }
+
+    @GetMapping("/getUser")
+    public ResponseEntity<Object> getUser(@RequestParam String username) {
+        UserNeo4j userNeo4j = userNeo4jService.getUser(username);
+        if (userNeo4j != null && !userNeo4j.getId().equals("null")) {
+            return ResponseEntity.ok(userNeo4j);
+        } else if (userNeo4j != null && userNeo4j.getId().equals("null")) {
+            // empty body rather than a plain-text message: Spring's String converter writes
+            // unquoted raw text even with an application/json content type, which Angular's
+            // HttpClient can't parse and turns into an error instead of a normal 200 response.
+            // An empty body is unambiguous and maps cleanly to null on the client.
+            return ResponseEntity.ok().build();
+        }
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}

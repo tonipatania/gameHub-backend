@@ -1,0 +1,170 @@
+package it.unipi.lsmsd.gamehub.controller;
+
+import it.unipi.lsmsd.gamehub.DTO.GameDTO;
+import it.unipi.lsmsd.gamehub.DTO.GameRailsDTO;
+import it.unipi.lsmsd.gamehub.model.Game;
+import it.unipi.lsmsd.gamehub.service.IGameRailService;
+import it.unipi.lsmsd.gamehub.service.IGameService;
+import it.unipi.lsmsd.gamehub.service.impl.GameNeo4jService;
+import java.util.List;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+
+@RequestMapping("game")
+@RestController
+@Slf4j
+public class GameController {
+    @Autowired private IGameService gameService;
+
+    @Autowired private IGameRailService gameRailService;
+
+    @Autowired private GameNeo4jService gameNeo4jService;
+
+    /*Postman parameters
+    {
+        "name": "BARRIER X",
+        "genres":"Strategy",
+        "avgScore":5
+    }*/
+    @GetMapping("/searchFilter")
+    public ResponseEntity<Object> retrieveGamesByParameters(
+            @RequestParam(required = false) String name,
+            @RequestParam(required = false) List<String> genres,
+            @RequestParam(required = false) Integer avgScore,
+            @PageableDefault(
+                            sort = {"name"},
+                            size = 24)
+                    Pageable pageable) {
+        Page<Game> gamePage =
+                gameService.retrieveGamesByParameters(name, genres, avgScore, pageable);
+        return ResponseEntity.ok(gamePage);
+    }
+
+    // scaffali della pagina Giochi (settimana, preferiti della community, ultime uscite)
+    @GetMapping("/rails")
+    public ResponseEntity<GameRailsDTO> getRails() {
+        return ResponseEntity.ok(gameRailService.getRails());
+    }
+
+    @GetMapping("/genres")
+    public ResponseEntity<Object> getAllGenres() {
+        List<String> genres = gameService.findDistinctGenres();
+        if (genres != null) {
+            return ResponseEntity.ok(genres);
+        }
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @GetMapping("/getAll")
+    public ResponseEntity<Page<Game>> showGames(
+            @PageableDefault(
+                            sort = {"name"},
+                            size = 50)
+                    Pageable pageable) {
+        Page<Game> gameDTOPage = gameService.getAll(pageable);
+        if (pageable.getPageNumber() >= gameDTOPage.getTotalPages()) {
+            // La pagina richiesta supera il numero massimo di pagine disponibili
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(null);
+        }
+        if (gameDTOPage.isEmpty()) {
+            // La pagina è vuota
+            return ResponseEntity.status(HttpStatus.NO_CONTENT).body(null);
+        }
+        return ResponseEntity.ok(gameDTOPage);
+    }
+
+    // admin function
+    /*Postman parameters
+    {
+        "name": "Prova",
+            "releaseDate": "Domani",
+            "price": 40,
+            "aboutTheGame": "Bellissimo",
+            "supportedLanguages": "Italian, Sicilian",
+            "developers": "Tonivico",
+            "publishers": "Tonivico",
+            "categories": "Tutte",
+            "genres": "Tutti"
+    }*/
+    @PostMapping("/create/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<String> createGame(
+            @PathVariable String userId, @RequestBody GameDTO gameDTO) {
+        // add game in mongo
+        ResponseEntity<String> responseEntity = gameService.createGame(gameDTO);
+        if (responseEntity.getStatusCode() != HttpStatus.CREATED) {
+            return responseEntity;
+        }
+        // add game in neo4j
+        ResponseEntity<String> response =
+                gameNeo4jService.addGame(responseEntity.getBody(), gameDTO.getName());
+        if (response.getStatusCode() == HttpStatus.CREATED) {
+            log.info("Utente {} ha creato il gioco {}", userId, gameDTO.getName());
+            return response;
+        }
+        // delete game in mongo if is not created in neo4j
+        log.error(
+                "Creazione del gioco {} fallita in Neo4j, rollback del documento Mongo {}",
+                gameDTO.getName(),
+                responseEntity.getBody());
+        return gameService.deleteGame(responseEntity.getBody());
+    }
+
+    // admin function
+    @DeleteMapping("gameSelected/delete/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<String> deleteGame(
+            @PathVariable String userId, @RequestParam String gameId) {
+        // delete in mongo
+        ResponseEntity<String> responseEntity = gameService.deleteGame(gameId);
+        if (responseEntity.getStatusCode() != HttpStatus.OK) {
+            return responseEntity;
+        }
+        // delete in neo4j
+        log.info("Utente {} ha eliminato il gioco {}", userId, gameId);
+        return gameNeo4jService.removeGame(gameId);
+    }
+
+    // admin function
+    @GetMapping("/countGame/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Object> countGame(@PathVariable String userId) {
+        long count = gameService.countGameDocument();
+        return ResponseEntity.ok(count);
+    }
+
+    // admin function
+    @GetMapping("gameSelected/getGamesIngoingLinks/{userId}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<Object> getGamesIngoingLinks(
+            @PathVariable String userId, @RequestParam String name) {
+        Integer countLinks = gameNeo4jService.getGamesIngoingLinks(name);
+        if (countLinks != null) {
+            return ResponseEntity.ok(countLinks);
+        }
+
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+
+    @GetMapping("/suggestGames/{username}")
+    public ResponseEntity<List<Game>> suggestGames(@PathVariable String username) {
+        return gameNeo4jService.getSuggestGames(username);
+    }
+
+    // games that actually have review content, used for the home page's review feed
+    private static final int MAX_WITH_REVIEWS_SIZE = 100;
+
+    @GetMapping("/withReviews")
+    public ResponseEntity<List<Game>> getGamesWithReviews(
+            @RequestParam(defaultValue = "20") int size) {
+        return ResponseEntity.ok(
+                gameService.getGamesWithReviews(Math.min(size, MAX_WITH_REVIEWS_SIZE)));
+    }
+}
